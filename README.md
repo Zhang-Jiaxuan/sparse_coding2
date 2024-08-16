@@ -1,3 +1,11 @@
+## 主要修改
+- 使用 test_interpret.py， 测试数据生成是否正确
+- 使用 interpret.py 筛选特征并评分，可以通过修改n_feats_to_explain选择特征数量
+  - "os.environ["OPENAI_API_KEY"]"需要设置成自己的API
+
+
+
+
 ## Sparse Coding
 
 This repo contains code for applying sparse coding to activation vectors in language models, including the code used for the results in the paper [Sparse Autoencoders Find Highly Interpretable Features in Language Models](https://arxiv.org/pdf/2309.08600.pdf). Work done with Logan Riggs and Aidan Ewart, advised by Lee Sharkey.
