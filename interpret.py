@@ -10,11 +10,13 @@ import sys
 from datetime import datetime
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-
+from transformers import LlamaTokenizer
+from transformers import LlamaForCausalLM
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import requests
+from sae_lens import SAE
 import torch
 import torch.nn as nn
 from baukit import Trace
@@ -27,9 +29,7 @@ from autoencoders.learned_dict import LearnedDict
 
 # set OPENAI_API_KEY environment variable from secrets.json['openai_key']
 # needs to be done before importing openai interp bits
-with open("secrets.json") as f:
-    secrets = json.load(f)
-    os.environ["OPENAI_API_KEY"] = secrets["openai_key"]
+os.environ["OPENAI_API_KEY"] = "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"
 
 mp.set_start_method("spawn", force=True)
 
@@ -48,7 +48,7 @@ from neuron_explainer.explanations.simulator import ExplanationNeuronSimulator
 from neuron_explainer.fast_dataclasses import loads
 
 EXPLAINER_MODEL_NAME = "gpt-4"  # "gpt-3.5-turbo"
-SIMULATOR_MODEL_NAME = "text-davinci-003"
+SIMULATOR_MODEL_NAME = "davinci-002"
 
 OPENAI_MAX_FRAGMENTS = 50000
 OPENAI_FRAGMENT_LEN = 64
@@ -94,18 +94,19 @@ def make_feature_activation_dataset(
     Returns a dataset which contains the activations of the model at that point,
     for each fragment in the dataset, transformed into the feature space
     """
-    model.to(device)
+    # model.to(device)
     model.eval()
-    learned_dict.to_device(device)
+    learned_dict.to(device)
 
     use_baukit = check_use_baukit(model.cfg.model_name)
+    feat_dim=max_features
+    # if max_features:
+    #     feat_dim = min(max_features, learned_dict.n_feats)
+    # else:
+    #     feat_dim = learned_dict.n_feats
 
-    if max_features:
-        feat_dim = min(max_features, learned_dict.n_feats)
-    else:
-        feat_dim = learned_dict.n_feats
+    sentence_dataset= load_dataset(path="/root/data/sae/dataset/FinCorpus", split="train", streaming=True)
 
-    sentence_dataset = load_dataset("openwebtext", split="train", streaming=True)
 
     if model.cfg.model_name == "nanoGPT":
         tokenizer_model = HookedTransformer.from_pretrained("gpt2", device=device)
@@ -141,7 +142,10 @@ def make_feature_activation_dataset(
                 sentence = next(iter_dataset)
                 # split the sentence into fragments
                 sentence_tokens = tokenizer_model.to_tokens(sentence["text"], prepend_bos=False).to(device)
+                # sentence_tokens = tokenizer_model.encode(sentence["text"]).to(device)
+                
                 n_tokens = sentence_tokens.shape[1]
+                print('n_tokens',n_tokens)
                 # get a random fragment from the sentence - only taking one fragment per sentence so examples aren't correlated]
                 if random_fragment:
                     token_start = np.random.randint(0, n_tokens - OPENAI_FRAGMENT_LEN)
@@ -175,6 +179,8 @@ def make_feature_activation_dataset(
                 token_ids = fragment_tokens[0].tolist()
 
                 feature_activation_data = learned_dict.encode(activation_data)
+                # feature_activation_data = sae.encode(activation_data)
+
                 feature_activation_maxes = torch.max(feature_activation_data, dim=0)[0]
 
                 activation_maxes_table[n_added, :] = feature_activation_maxes.cpu().numpy()[:feat_dim]
@@ -188,7 +194,7 @@ def make_feature_activation_dataset(
 
                 n_added += 1
 
-                if n_added >= n_fragments:
+                if n_added >= n_fragments:#n_fragments:5000
                     break
 
     print(f"Added {n_added} fragments, thrown {n_thrown} fragments")
@@ -223,7 +229,7 @@ def get_df(
     force_refresh: bool = False,
 ) -> pd.DataFrame:
     # Load feature dict
-    feature_dict.to_device(device)
+    feature_dict.to(device)
 
     df_loc = os.path.join(save_loc, f"activation_df.hdf")
 
@@ -240,16 +246,38 @@ def get_df(
             print("Dataset does not have enough features, remaking")
 
     if reload_data:
-        model = HookedTransformer.from_pretrained(model_name, device=device)
+        tokenizer = LlamaTokenizer.from_pretrained(cfg.model_name)
+        hf_model = LlamaForCausalLM.from_pretrained(cfg.model_name, low_cpu_mem_usage=True,device_map="auto")
 
+        # model = HookedTransformer.from_pretrained(model_name, device=device)
+        model = HookedTransformer.from_pretrained(
+            cfg.model_name,
+            hf_model=hf_model,
+            device="cuda",
+            fold_ln=False,
+            center_writing_weights=False,
+            center_unembed=False,
+            tokenizer=tokenizer,
+            n_devices=4
+        )
         base_df = make_feature_activation_dataset(
-            model,
-            learned_dict=feature_dict,
+            model=model,
             layer=layer,
-            layer_loc=layer_loc,
-            device=device,
+            layer_loc="mlpout",
+            learned_dict=feature_dict ,
+            device="cuda",
+            n_fragments=20,
+            random_fragment=False,
             max_features=n_feats,
         )
+        # base_df = make_feature_activation_dataset(
+        #     model,
+        #     learned_dict=feature_dict,
+        #     layer=layer,
+        #     layer_loc=layer_loc,
+        #     device=device,
+        #     max_features=n_feats,
+        # )
         # save the dataset, saving each column separately so that we can retrive just the columns we want later
         print(f"Saving dataset to {df_loc}")
         os.makedirs(save_loc, exist_ok=True)
@@ -257,13 +285,16 @@ def get_df(
 
     # save the autoencoder being investigated
     os.makedirs(save_loc, exist_ok=True)
-    torch.save(feature_dict, os.path.join(save_loc, "autoencoder.pt"))
+    torch.save(feature_dict.state_dict(), os.path.join(save_loc, "autoencoder.pt"))
 
     return base_df
 
 
 async def interpret(base_df: pd.DataFrame, save_folder: str, n_feats_to_explain: int) -> None:
-    for feat_n in range(0, n_feats_to_explain):
+    # feature_idx=[47848]
+    i=9
+    for feat_n in range(0+2000*i, n_feats_to_explain+2000*i):
+    # for feat_n in feature_idx:
         if os.path.exists(os.path.join(save_folder, f"feature_{feat_n}")):
             print(f"Feature {feat_n} already exists, skipping")
             continue
@@ -279,6 +310,7 @@ async def interpret(base_df: pd.DataFrame, save_folder: str, n_feats_to_explain:
             print(f"Dataset does not have all required columns for feature {feat_n}, skipping")
             continue
         df = base_df[read_fields].copy()
+
         sorted_df = df.sort_values(by=f"feature_{feat_n}_max", ascending=False)
         sorted_df = sorted_df.head(TOTAL_EXAMPLES)
         top_activation_records = []
@@ -298,6 +330,7 @@ async def interpret(base_df: pd.DataFrame, save_folder: str, n_feats_to_explain:
 
         # making sure that the have some variation in each of the features, though need to be careful that this doesn't bias the results
         random_ordering = torch.randperm(len(df)).tolist()
+        # print('random_ordering',random_ordering)
         skip_feature = False
         while len(random_activation_records) < TOTAL_EXAMPLES:
             try:
@@ -317,7 +350,7 @@ async def interpret(base_df: pd.DataFrame, save_folder: str, n_feats_to_explain:
         if skip_feature:
             # Add placeholder folder so that we don't try to recompute this feature
             os.makedirs(os.path.join(save_folder, f"feature_{feat_n}"), exist_ok=True)
-            print(f"Skipping feature {feat_n} due to lack of activating examples")
+            # print(f"Skipping feature {feat_n} due to lack of activating examples")
             continue
 
         neuron_id = NeuronId(layer_index=2, neuron_index=feat_n)
@@ -344,9 +377,12 @@ async def interpret(base_df: pd.DataFrame, save_folder: str, n_feats_to_explain:
         assert len(explanations) == 1
         explanation = explanations[0]
         print(f"Feature {feat_n}, {explanation=}")
-
+        # print('len(df)',feat_n,':',len(df))
+        # print('df',df)
         # Simulate and score the explanation.
         format = PromptFormat.HARMONY_V4 if SIMULATOR_MODEL_NAME == "gpt-3.5-turbo" else PromptFormat.INSTRUCTION_FOLLOWING
+        #卡到这里了
+        
         simulator = UncalibratedNeuronSimulator(
             ExplanationNeuronSimulator(
                 SIMULATOR_MODEL_NAME,
@@ -413,6 +449,7 @@ def get_score(lines: List[str], mode: str):
 
 def run_folder(cfg: InterpArgs):
     base_folder = cfg.load_interpret_autoencoder
+
     all_encoders = os.listdir(cfg.load_interpret_autoencoder)
     all_encoders = [x for x in all_encoders if (x.endswith(".pt") or x.endswith(".pkl"))]
     print(f"Found {len(all_encoders)} encoders in {cfg.load_interpret_autoencoder}")
@@ -538,154 +575,154 @@ def worker(queue, device_id):
         run(learned_dict, cfg)
 
 
-def interpret_across_baselines(n_gpus: int = 3):
-    baselines_dir = "/mnt/ssd-cluster/baselines"
-    save_dir = "/mnt/ssd-cluster/auto_interp_results/"
-    os.makedirs(save_dir, exist_ok=True)
-    base_cfg = InterpArgs()
+# def interpret_across_baselines(n_gpus: int = 3):
+#     baselines_dir = "/mnt/ssd-cluster/baselines"
+#     save_dir = "/mnt/ssd-cluster/auto_interp_results/"
+#     os.makedirs(save_dir, exist_ok=True)
+#     base_cfg = InterpArgs()
 
-    if n_gpus > 1:
-        job_queue: mp.Queue = mp.Queue()
+#     if n_gpus > 1:
+#         job_queue: mp.Queue = mp.Queue()
 
-    all_folders = os.listdir(baselines_dir)
-    for folder in all_folders:
-        layer_str, layer_loc = folder.split("_")
-        layer = int(layer_str[1:])
-        layer_baselines = os.listdir(os.path.join(baselines_dir, folder))
-        for baseline_file in layer_baselines:
-            cfg = copy.deepcopy(base_cfg)
-            cfg.layer = layer
-            cfg.layer_loc = layer_loc
-            cfg.save_loc = os.path.join(save_dir, folder, baseline_file[:-3])
-            cfg.n_feats_explain = 150
-            if not cfg.layer_loc == "residual":
-                continue
-            if "nmf" in baseline_file:
-                continue
-            learned_dict = torch.load(
-                os.path.join(baselines_dir, folder, baseline_file),
-                map_location=cfg.device,
-            )
-            print(f"{layer=}, {layer_loc=}, {baseline_file=}")
-            if n_gpus == 1:
-                run(learned_dict, cfg)
-            else:
-                job_queue.put((learned_dict, cfg))
+#     all_folders = os.listdir(baselines_dir)
+#     for folder in all_folders:
+#         layer_str, layer_loc = folder.split("_")
+#         layer = int(layer_str[1:])
+#         layer_baselines = os.listdir(os.path.join(baselines_dir, folder))
+#         for baseline_file in layer_baselines:
+#             cfg = copy.deepcopy(base_cfg)
+#             cfg.layer = layer
+#             cfg.layer_loc = layer_loc
+#             cfg.save_loc = os.path.join(save_dir, folder, baseline_file[:-3])
+#             cfg.n_feats_explain = 150
+#             if not cfg.layer_loc == "residual":
+#                 continue
+#             if "nmf" in baseline_file:
+#                 continue
+#             learned_dict = torch.load(
+#                 os.path.join(baselines_dir, folder, baseline_file),
+#                 map_location=cfg.device,
+#             )
+#             print(f"{layer=}, {layer_loc=}, {baseline_file=}")
+#             if n_gpus == 1:
+#                 run(learned_dict, cfg)
+#             else:
+#                 job_queue.put((learned_dict, cfg))
 
-    if n_gpus > 1:
-        processes = [mp.Process(target=worker, args=(job_queue, i)) for i in range(n_gpus)]
-        for p in processes:
-            p.start()
-        for p in processes:
-            p.join()
+#     if n_gpus > 1:
+#         processes = [mp.Process(target=worker, args=(job_queue, i)) for i in range(n_gpus)]
+#         for p in processes:
+#             p.start()
+#         for p in processes:
+#             p.join()
 
 
-def interpret_across_big_sweep(l1_val: float, n_gpus: int = 1):
-    base_cfg = InterpArgs()
-    base_dir = "/mnt/ssd-cluster/bigrun0308"
-    save_dir = "/mnt/ssd-cluster/auto_interp_results/"
+# def interpret_across_big_sweep(l1_val: float, n_gpus: int = 1):
+#     base_cfg = InterpArgs()
+#     base_dir = "/mnt/ssd-cluster/bigrun0308"
+#     save_dir = "/mnt/ssd-cluster/auto_interp_results/"
     
-    n_chunks_training = 10
-    os.makedirs(save_dir, exist_ok=True)
+#     n_chunks_training = 10
+#     os.makedirs(save_dir, exist_ok=True)
 
-    all_folders = os.listdir(base_dir)
-    if n_gpus != 1:
-        job_queue: List[Tuple[Callable, InterpArgs]] = []
+#     all_folders = os.listdir(base_dir)
+#     if n_gpus != 1:
+#         job_queue: List[Tuple[Callable, InterpArgs]] = []
 
-    for folder in all_folders:
-        try:
-            tied, layer_loc, layer, ratio, extra_str = parse_folder_name(folder)
-        except:
-            continue
-        print(f"{tied}, {layer_loc=}, {layer=}, {ratio=}")
-        if layer_loc != "residual":
-            continue
-        if tied != "tied":
-            continue
-        if ratio != 2:
-            continue
-        if extra_str != "":
-            continue
+#     for folder in all_folders:
+#         try:
+#             tied, layer_loc, layer, ratio, extra_str = parse_folder_name(folder)
+#         except:
+#             continue
+#         print(f"{tied}, {layer_loc=}, {layer=}, {ratio=}")
+#         if layer_loc != "residual":
+#             continue
+#         if tied != "tied":
+#             continue
+#         if ratio != 2:
+#             continue
+#         if extra_str != "":
+#             continue
 
-        cfg = copy.deepcopy(base_cfg)
-        autoencoders = torch.load(
-            os.path.join(base_dir, folder, f"_{n_chunks_training - 1}", "learned_dicts.pt"),
-            map_location=cfg.device,
-        )
-        # find ae with matching l1_val
-        matching_encoders = [ae for ae in autoencoders if abs(ae[1]["l1_alpha"] - l1_val) < 1e-4]
-        if not len(matching_encoders) == 1:
-            print(f"Found {len(matching_encoders)} matching encoders for {folder}")
-        matching_encoder = matching_encoders[0][0]
+#         cfg = copy.deepcopy(base_cfg)
+#         autoencoders = torch.load(
+#             os.path.join(base_dir, folder, f"_{n_chunks_training - 1}", "learned_dicts.pt"),
+#             map_location=cfg.device,
+#         )
+#         # find ae with matching l1_val
+#         matching_encoders = [ae for ae in autoencoders if abs(ae[1]["l1_alpha"] - l1_val) < 1e-4]
+#         if not len(matching_encoders) == 1:
+#             print(f"Found {len(matching_encoders)} matching encoders for {folder}")
+#         matching_encoder = matching_encoders[0][0]
 
-        # save the learned dict
-        save_str = f"l{layer}_{layer_loc}/{tied}_r{ratio}_l1a{l1_val:.2}"
-        # os.makedirs(os.path.join(save_dir, save_str), exist_ok=True)
-        # torch.save(matching_encoder, os.path.join(save_dir, save_str, "learned_dict.pt"))
+#         # save the learned dict
+#         save_str = f"l{layer}_{layer_loc}/{tied}_r{ratio}_l1a{l1_val:.2}"
+#         # os.makedirs(os.path.join(save_dir, save_str), exist_ok=True)
+#         # torch.save(matching_encoder, os.path.join(save_dir, save_str, "learned_dict.pt"))
 
-        # run the interpretation
-        cfg.load_interpret_autoencoder = os.path.join(save_dir, save_str, "learned_dict.pt")
-        cfg.layer = layer
-        cfg.layer_loc = layer_loc
-        cfg.save_loc = os.path.join(save_dir, save_str)
-        cfg.n_feats_explain = 150
-        if n_gpus == 1:
-            run(matching_encoder, cfg)
-        else:
-            cfg.device = f"cuda:{len(job_queue) % n_gpus}"
-            job_queue.append((matching_encoder, cfg))
+#         # run the interpretation
+#         cfg.load_interpret_autoencoder = os.path.join(save_dir, save_str, "learned_dict.pt")
+#         cfg.layer = layer
+#         cfg.layer_loc = layer_loc
+#         cfg.save_loc = os.path.join(save_dir, save_str)
+#         cfg.n_feats_explain = 150
+#         if n_gpus == 1:
+#             run(matching_encoder, cfg)
+#         else:
+#             cfg.device = f"cuda:{len(job_queue) % n_gpus}"
+#             job_queue.append((matching_encoder, cfg))
 
-    if n_gpus > 1:
-        with mp.Pool(n_gpus) as p:
-            p.starmap(run, job_queue)
+#     if n_gpus > 1:
+#         with mp.Pool(n_gpus) as p:
+#             p.starmap(run, job_queue)
 
 
-def interpret_across_chunks(l1_val: float, n_gpus: int = 1):
-    base_cfg = InterpArgs()
-    base_dir = "/mnt/ssd-cluster/longrun2408"
-    save_dir = "/mnt/ssd-cluster/auto_interp_results_overtime/"
-    os.makedirs(save_dir, exist_ok=True)
+# def interpret_across_chunks(l1_val: float, n_gpus: int = 1):
+#     base_cfg = InterpArgs()
+#     base_dir = "/mnt/ssd-cluster/longrun2408"
+#     save_dir = "/mnt/ssd-cluster/auto_interp_results_overtime/"
+#     os.makedirs(save_dir, exist_ok=True)
 
-    all_folders = os.listdir(base_dir)
-    if n_gpus != 1:
-        job_queue: List[Tuple[Callable, InterpArgs]] = []
+#     all_folders = os.listdir(base_dir)
+#     if n_gpus != 1:
+#         job_queue: List[Tuple[Callable, InterpArgs]] = []
 
-    for folder in all_folders:
-        for n_chunks in [1, 4, 16, 32]:
-            tied, layer_loc, layer, ratio, extra_str = parse_folder_name(folder)
-            if layer != base_cfg.layer:
-                continue
-            cfg = copy.deepcopy(base_cfg)
-            autoencoders = torch.load(
-                os.path.join(base_dir, folder, f"_{n_chunks - 1}", "learned_dicts.pt"),
-                map_location=cfg.device,
-            )
-            # find ae with matching l1_val
-            matching_encoders = [ae for ae in autoencoders if abs(ae[1]["l1_alpha"] - l1_val) < 1e-4]
-            if not len(matching_encoders) == 1:
-                print(f"Found {len(matching_encoders)} matching encoders for {folder}")
-            matching_encoder = matching_encoders[0][0]
+#     for folder in all_folders:
+#         for n_chunks in [1, 4, 16, 32]:
+#             tied, layer_loc, layer, ratio, extra_str = parse_folder_name(folder)
+#             if layer != base_cfg.layer:
+#                 continue
+#             cfg = copy.deepcopy(base_cfg)
+#             autoencoders = torch.load(
+#                 os.path.join(base_dir, folder, f"_{n_chunks - 1}", "learned_dicts.pt"),
+#                 map_location=cfg.device,
+#             )
+#             # find ae with matching l1_val
+#             matching_encoders = [ae for ae in autoencoders if abs(ae[1]["l1_alpha"] - l1_val) < 1e-4]
+#             if not len(matching_encoders) == 1:
+#                 print(f"Found {len(matching_encoders)} matching encoders for {folder}")
+#             matching_encoder = matching_encoders[0][0]
 
-            # save the learned dict
-            save_str = f"l{layer}_{layer_loc}/{tied}_r{ratio}_nc{n_chunks}_l1a{l1_val:.2}"
-            os.makedirs(os.path.join(save_dir, save_str), exist_ok=True)
-            torch.save(matching_encoder, os.path.join(save_dir, save_str, "learned_dict.pt"))
+#             # save the learned dict
+#             save_str = f"l{layer}_{layer_loc}/{tied}_r{ratio}_nc{n_chunks}_l1a{l1_val:.2}"
+#             os.makedirs(os.path.join(save_dir, save_str), exist_ok=True)
+#             torch.save(matching_encoder, os.path.join(save_dir, save_str, "learned_dict.pt"))
 
-            # run the interpretation
-            cfg.load_interpret_autoencoder = os.path.join(save_dir, save_str, "learned_dict.pt")
-            cfg.layer = layer
-            cfg.layer_loc = layer_loc
-            cfg.save_loc = os.path.join(save_dir, save_str)
-            cfg.n_feats_explain = 100
-            if n_gpus == 1:
-                run(matching_encoder, cfg)
-            else:
-                cfg.device = f"cuda:{len(job_queue) % n_gpus}"
-                job_queue.append((matching_encoder, cfg))
+#             # run the interpretation
+#             cfg.load_interpret_autoencoder = os.path.join(save_dir, save_str, "learned_dict.pt")
+#             cfg.layer = layer
+#             cfg.layer_loc = layer_loc
+#             cfg.save_loc = os.path.join(save_dir, save_str)
+#             cfg.n_feats_explain = 100
+#             if n_gpus == 1:
+#                 run(matching_encoder, cfg)
+#             else:
+#                 cfg.device = f"cuda:{len(job_queue) % n_gpus}"
+#                 job_queue.append((matching_encoder, cfg))
 
-    if n_gpus > 1:
-        with mp.Pool(n_gpus) as p:
-            p.starmap(run, job_queue)
+#     if n_gpus > 1:
+#         with mp.Pool(n_gpus) as p:
+#             p.starmap(run, job_queue)
 
 
 def read_results(activation_name: str, score_mode: str) -> None:
@@ -763,53 +800,51 @@ def read_results(activation_name: str, score_mode: str) -> None:
 
 if __name__ == "__main__":
     cfg: BaseArgs
-    if len(sys.argv) > 1 and sys.argv[1] == "read_results":
-        cfg = InterpGraphArgs()
-        if cfg.score_mode == "all":
-            score_modes = ["top", "random", "top_random"]
-        else:
-            score_modes = [cfg.score_mode]
+    # if len(sys.argv) > 1 and sys.argv[1] == "read_results":
+    #     cfg = InterpGraphArgs()
+    #     if cfg.score_mode == "all":
+    #         score_modes = ["top", "random", "top_random"]
+    #     else:
+    #         score_modes = [cfg.score_mode]
  
-        base_path = "/mnt/ssd-cluster/auto_interp_results"
+    #     base_path = "/mnt/ssd-cluster/auto_interp_results"
 
-        if cfg.run_all:
-            activation_names = [x for x in os.listdir(base_path) if os.path.isdir(os.path.join(base_path, x))]
-        else:
-            activation_names = [f"{cfg.model_name.split('/')[-1]}_layer{cfg.layer}_{cfg.layer_loc}"]
+    #     if cfg.run_all:
+    #         activation_names = [x for x in os.listdir(base_path) if os.path.isdir(os.path.join(base_path, x))]
+    #     else:
+    #         activation_names = [f"{cfg.model_name.split('/')[-1]}_layer{cfg.layer}_{cfg.layer_loc}"]#
 
-        for activation_name in activation_names:
-            for score_mode in score_modes:
-                read_results(activation_name, score_mode)
+    #     for activation_name in activation_names:
+    #         for score_mode in score_modes:
+    #             read_results(activation_name, score_mode)
 
-    elif len(sys.argv) > 1 and sys.argv[1] == "run_group":
-        cfg = InterpArgs()
-        run_from_grouped(cfg, cfg.load_interpret_autoencoder)
+    # elif len(sys.argv) > 1 and sys.argv[1] == "run_group":
+    #     cfg = InterpArgs()
+    #     run_from_grouped(cfg, cfg.load_interpret_autoencoder)
 
-    elif len(sys.argv) > 1 and sys.argv[1] == "big_sweep":
-        sys.argv.pop(1)
-        # l1_val = 0.00018478
-        l1_val = 0.0008577 # 8e-4 in logspace(-4, -2, 16)
-        # l1_val = 0.00083768 # 8e-4 in logspace(-4, -2, 14)
-        # l1_val = 0.0007197 # 8e-4 in logspace(-4, -2, 8)
-        # l1_val = 1e-3
-        # l1_val = 0.000316  # early one for mlp??
-        interpret_across_big_sweep(l1_val)
+    # elif len(sys.argv) > 1 and sys.argv[1] == "big_sweep":
+    #     sys.argv.pop(1)
+    #     # l1_val = 0.00018478
+    #     l1_val = 0.0008577 # 8e-4 in logspace(-4, -2, 16)
+    #     # l1_val = 0.00083768 # 8e-4 in logspace(-4, -2, 14)
+    #     # l1_val = 0.0007197 # 8e-4 in logspace(-4, -2, 8)
+    #     # l1_val = 1e-3
+    #     # l1_val = 0.000316  # early one for mlp??
+    #     interpret_across_big_sweep(l1_val)
 
-    elif len(sys.argv) > 1 and sys.argv[1] == "all_baselines":
-        sys.argv.pop(1)
-        interpret_across_baselines()
+    # elif len(sys.argv) > 1 and sys.argv[1] == "all_baselines":
+    #     sys.argv.pop(1)
+    #     interpret_across_baselines()
 
-    elif len(sys.argv) > 1 and sys.argv[1] == "chunks":
-        l1_val = 0.0007197  # 8e-4 in logspace(-4, -2, 8)
-        sys.argv.pop(1)
-        interpret_across_chunks(l1_val)
+    # elif len(sys.argv) > 1 and sys.argv[1] == "chunks":
+    #     l1_val = 0.0007197  # 8e-4 in logspace(-4, -2, 8)
+    #     sys.argv.pop(1)
+    #     interpret_across_chunks(l1_val)
 
-    else:
-        cfg = InterpArgs()
-        if os.path.isdir(cfg.load_interpret_autoencoder):
-            run_folder(cfg)
-        else:
-            learned_dict = torch.load(cfg.load_interpret_autoencoder, map_location=cfg.device)
-            save_folder = f"/mnt/ssd-cluster/auto_interp_results/l{cfg.layer}_{cfg.layer_loc}"
-            cfg.save_loc = os.path.join(save_folder, cfg.load_interpret_autoencoder)
-            run(learned_dict, cfg)
+    # else:
+    cfg = InterpArgs()
+
+    sae =  SAE.load_from_pretrained(cfg.load_interpret_autoencoder,device="cuda")
+    save_folder = f"/root/data/sae/sae_checkpoint/bll8fob4/auto_interp_results/l{cfg.layer}_{cfg.layer_loc}"
+    cfg.save_loc = os.path.join(save_folder, cfg.load_interpret_autoencoder)
+    run(sae, cfg)

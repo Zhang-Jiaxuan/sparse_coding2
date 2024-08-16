@@ -70,7 +70,7 @@ class SyntheticEnsembleArgs(EnsembleArgs):
     
 @dataclass
 class ErasureArgs(BaseArgs):
-    model_name: str = "EleutherAI/pythia-70m-deduped"
+    model_name: str = "EleutherAI/pythia-70m-deduped"   #Pythia Scaling Suite 是一组模型，旨在促进 可解释性研究
     device: str = "cuda:4"
     layer: Optional[int] = None
     count_cutoff: int = 10000
@@ -111,30 +111,31 @@ class ToyArgs(BaseArgs):
 
 @dataclass
 class InterpArgs(BaseArgs):
-    layer: int = 2
-    model_name: str = "EleutherAI/pythia-70m-deduped"
-    layer_loc: str = "residual"
-    device: str = "cuda:0" if torch.cuda.is_available() else "cpu"
-    n_feats_explain: int = 10
-    load_interpret_autoencoder: str = ""
+    layer: int =0
+    model_name: str = "/root/data/sae/LLMmodel/XuanYuan-6B-Chat"
+    layer_loc: str = "mlpout"
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    n_feats_explain: int = 2000
+
+    load_interpret_autoencoder: str = '/root/data/sae/sae_checkpoint//bll8fob4/final_40960000'  #sae_path
     tied_ae: bool = False
-    interp_name: str = ""
+    interp_name: str = "GPT-4"
     sort_mode: str = "max"
     use_decoder: bool = True
-    df_n_feats: int = 200
+    df_n_feats: int =20000
     top_k: int = 50
     save_loc: str = ""
     
     
 @dataclass
 class InterpGraphArgs(BaseArgs):
-    layer: int = 1 
-    model_name: str = "EleutherAI/pythia-70m/deduped"
-    layer_loc: str = "mlp"
+    layer: int = 0 
+    model_name: str = "/root/data/sae/LLMmodel/XuanYuan-6B-Chat"
+    layer_loc: str = "mlpout"
     score_mode: str = "all"
     run_all: bool = False
     
 class InvestigateArgs(BaseArgs):
     threshold: float = 0.9
     layer: int = 2
-    device: str = "cuda:0" if torch.cuda.is_available() else "cpu"
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"

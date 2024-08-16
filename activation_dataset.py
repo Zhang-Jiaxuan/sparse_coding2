@@ -58,13 +58,14 @@ def get_activation_size(model_name: str, layer_loc: str):
         return model_cfg["d_head"] * model_cfg["n_heads"]
 
 
+# def check_transformerlens_model(model_name: str):
+#     try:
+#         get_official_model_name(model_name)
+#         return True
+#     except ValueError:
+#         return False
 def check_transformerlens_model(model_name: str):
-    try:
-        get_official_model_name(model_name)
-        return True
-    except ValueError:
-        return False
-
+    return True
 
 def make_tensor_name(layer: int, layer_loc: str, model_name: str) -> str:
     """Make the tensor name for a given layer and model."""
@@ -510,7 +511,7 @@ def setup_data_new(
     chunk_size: int,
     n_chunks: int,
     skip_chunks: int = 0,
-    device: Optional[torch.device] = torch.device("cuda:0"),
+    device: Optional[torch.device] = torch.device("cuda:6"),
     max_length: int = 2048,
     model_batch_size: int = 4,
     precision: Literal["float16", "float32"] = "float16",
@@ -552,7 +553,7 @@ def setup_data(
     n_chunks: int = 100,
     chunk_size_gb: float = 2,
     skip_chunks: int = 0,
-    device: torch.device = torch.device("cuda:0"),
+    device: torch.device = torch.device("cuda:6"),
     center_dataset: bool = False,
 ):
     layers = [layer] if isinstance(layer, int) else layer
