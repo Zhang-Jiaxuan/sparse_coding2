@@ -292,8 +292,7 @@ def get_df(
 
 async def interpret(base_df: pd.DataFrame, save_folder: str, n_feats_to_explain: int) -> None:
     # feature_idx=[47848]
-    i=9
-    for feat_n in range(0+2000*i, n_feats_to_explain+2000*i):
+    for feat_n in range(0, n_feats_to_explain):
     # for feat_n in feature_idx:
         if os.path.exists(os.path.join(save_folder, f"feature_{feat_n}")):
             print(f"Feature {feat_n} already exists, skipping")
